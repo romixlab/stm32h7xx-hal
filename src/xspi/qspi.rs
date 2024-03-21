@@ -290,9 +290,9 @@ impl Qspi<stm32::QUADSPI> {
             w.fmode()
                 .bits(0) // indirect mode
                 .dmode()
-                .bits(config.mode.reg_value())
+                .bits(config.data_mode.reg_value())
                 .admode()
-                .bits(config.mode.reg_value())
+                .bits(config.address_mode.reg_value())
                 .adsize()
                 .bits(0) // Eight-bit address
                 .imode()
@@ -338,7 +338,10 @@ impl Qspi<stm32::QUADSPI> {
 
         Qspi {
             rb: regs,
-            mode: config.mode,
+            instruction_mode: config.instruction_mode,
+            address_mode: config.address_mode,
+            alternate_mode: config.alternate_mode,
+            data_mode: config.data_mode,
         }
     }
 }

@@ -308,7 +308,10 @@ mod common {
     /// ```
     #[derive(Copy, Clone)]
     pub struct Config {
-        pub(super) mode: XspiMode,
+        pub(super) instruction_mode: XspiMode,
+        pub(super) address_mode: XspiMode,
+        pub(super) alternate_mode: XspiMode,
+        pub(super) data_mode: XspiMode,
         pub(super) frequency: Hertz,
         pub(super) dummy_cycles: u8,
         pub(super) sampling_edge: SamplingEdge,
@@ -323,7 +326,10 @@ mod common {
         /// * Sample on falling edge
         pub fn new(frequency: Hertz) -> Self {
             Config {
-                mode: XspiMode::OneBit,
+                instruction_mode: XspiMode::OneBit,
+                address_mode: XspiMode::OneBit,
+                alternate_mode: XspiMode::OneBit,
+                data_mode: XspiMode::OneBit,
                 frequency,
                 dummy_cycles: 0,
                 sampling_edge: SamplingEdge::Falling,
@@ -331,13 +337,16 @@ mod common {
             }
         }
 
-        /// Specify the operating mode of the XSPI bus. Can be 1-bit, 2-bit or
+        /// Specify the operating mode of the XSPI bus for all phases. Can be 1-bit, 2-bit or
         /// 4-bit for Quadspi; 1-bit, 2-bit, 4-bit or 8-bit for Octospi.
         ///
         /// The operating mode can also be changed using the
         /// [`configure_mode`](Xspi#method.configure_mode) method
         pub fn mode(mut self, mode: XspiMode) -> Self {
-            self.mode = mode;
+            self.instruction_mode = mode;
+            self.address_mode = mode;
+            self.alternate_mode = mode;
+            self.data_mode = mode;
             self
         }
 
@@ -409,7 +418,10 @@ mod common {
         /// We store the current mode here because for extended transactions
         /// various phases may be removed. Therefore we need to restore them
         /// after each transaction.
-        pub(super) mode: XspiMode,
+        pub(super) instruction_mode: XspiMode,
+        pub(super) address_mode: XspiMode,
+        pub(super) alternate_mode: XspiMode,
+        pub(super) data_mode: XspiMode,
     }
 
     #[cfg(any(feature = "rm0433", feature = "rm0399"))]
@@ -515,7 +527,7 @@ mod common {
             }
 
             /// Configure the operational mode (number of bits) of the XSPI
-            /// interface.
+            /// for all four phases to be the same.
             ///
             /// # Args
             /// * `mode` - The newly desired mode of the interface.
@@ -524,8 +536,35 @@ mod common {
             /// Returns XspiError::Busy if an operation is ongoing
             pub fn configure_mode(&mut self, mode: XspiMode) -> Result<(), XspiError> {
                 self.is_busy()?;
-                self.mode = mode;
+                self.instruction_mode = mode;
+                self.address_mode = mode;
+                self.alternate_mode = mode;
+                self.data_mode = mode;
                 self.set_mode_address_data_only();
+
+                Ok(())
+            }
+
+            /// Configure the operational mode (number of bits) of the XSPI
+            /// separately for each phase.
+            ///
+            /// # Args
+            /// * `mode` - The newly desired mode of the interface.
+            ///
+            /// # Errors
+            /// Returns XspiError::Busy if an operation is ongoing
+            pub fn configure_mode_separate(
+                &mut self,
+                instruction_mode: XspiMode,
+                address_mode: XspiMode,
+                alternate_mode: XspiMode,
+                data_mode: XspiMode
+            ) -> Result<(), XspiError> {
+                self.is_busy()?;
+                self.instruction_mode = instruction_mode;
+                self.address_mode = address_mode;
+                self.alternate_mode = alternate_mode;
+                self.data_mode = data_mode;
 
                 Ok(())
             }
@@ -537,13 +576,13 @@ mod common {
                     w.imode()     // NO instruction phase
                         .bits(0)
                         .admode() // address phase
-                        .bits(self.mode.reg_value())
+                        .bits(self.address_mode.reg_value())
                         .adsize()
                         .bits(0)  // 8-bit address
                         .abmode() // NO alternate-bytes phase
                         .bits(0)
                         .dmode()  // data phase
-                        .bits(self.mode.reg_value())
+                        .bits(self.data_mode.reg_value())
                 });
             }
 
@@ -560,11 +599,10 @@ mod common {
                               alternate_bytes: XspiWord, dummy_cycles: u8, data: bool, read: bool) {
 
                 let fmode = if read { 0b01 } else { 0b00 };
-                let mode = self.mode.reg_value();
-                let imode = if instruction != XspiWord::None { mode } else { 0 };
-                let admode = if address != XspiWord::None { mode } else { 0 };
-                let abmode = if alternate_bytes != XspiWord::None { mode } else { 0 };
-                let dmode = if data { mode } else { 0 };
+                let imode = if instruction != XspiWord::None { self.instruction_mode.reg_value() } else { 0 };
+                let admode = if address != XspiWord::None { self.address_mode.reg_value() } else { 0 };
+                let abmode = if alternate_bytes != XspiWord::None { self.alternate_mode.reg_value() } else { 0 };
+                let dmode = if data { self.data_mode.reg_value() } else { 0 };
 
                 //writing to ccr will trigger the start of a transaction if there is no address or
                 //data rm0433 pg 894, so we do it all in one go
@@ -708,6 +746,8 @@ mod common {
             ///                   For RM0433/RM0399 parts, this must be 8 bits or None
             /// * `address` - The word to be used for the address phase.
             /// * `alternate_bytes` - The word to be used for the alternate-bytes phase.
+            /// * `dummy_cycles` - 0 to 31 clock cycles between the alternate-bytes
+            ///                    and the data length.
             /// * `length` - The length of the write operation in bytes. Use
             ///            zero to remove the data phase entirely.
             ///
@@ -715,6 +755,7 @@ mod common {
                                   instruction: XspiWord,
                                   address: XspiWord,
                                   alternate_bytes: XspiWord,
+                                  dummy_cycles: u8,
                                   length: usize) -> Result<(), XspiError> {
                 self.is_busy()?;
 
@@ -728,8 +769,7 @@ mod common {
                         .write(|w| unsafe { w.dl().bits(length as u32 - 1) });
                 }
 
-                // Setup extended mode. Typically no dummy cycles in write mode
-                self.setup_extended(instruction, address, alternate_bytes, 0, length > 0, false);
+                self.setup_extended(instruction, address, alternate_bytes, dummy_cycles, length > 0, false);
 
                 Ok(())
             }
@@ -742,6 +782,8 @@ mod common {
             /// * `instruction` - The word to be used for the instruction phase.
             /// * `address` - The word to be used for the address phase.
             /// * `alternate_bytes` - The word to be used for the alternate-bytes phase.
+            /// * `dummy_cycles` - 0 to 31 clock cycles between the alternate-bytes
+            ///                    and the data length.
             /// * `data` - An array of data to transfer over the XSPI interface. Use
             ///            an empty slice to remove the data phase entirely.
             ///
@@ -753,13 +795,14 @@ mod common {
                                   instruction: XspiWord,
                                   address: XspiWord,
                                   alternate_bytes: XspiWord,
+                                  dummy_cycles: u8,
                                   data: &[u8]) -> Result<(), XspiError> {
                 assert!(
                     data.len() <= 32,
                     "Transactions larger than the XSPI FIFO are currently unsupported"
                 );
 
-                self.begin_write_extended(instruction, address, alternate_bytes, data.len())?;
+                self.begin_write_extended(instruction, address, alternate_bytes, dummy_cycles, data.len())?;
 
                 // Write data to the FIFO in a byte-wise manner.
                 // Transaction starts here
